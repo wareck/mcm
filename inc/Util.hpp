@@ -26,6 +26,7 @@
 
 #include <mutex>
 #include <cassert>
+#include <cstdlib>
 #include <ctime>
 #include <emmintrin.h>
 #include <fstream>
@@ -93,7 +94,7 @@ static const uint32_t kPageSize = 4 * KB;
 static const uint32_t kBitsPerByte = 8;
 
 ALWAYS_INLINE void Prefetch(const void* ptr) {
-#ifdef WIN32
+#ifdef _MSC_VER
   _mm_prefetch((char*)ptr, _MM_HINT_T0);
 #else
   __builtin_prefetch(ptr);
@@ -145,7 +146,13 @@ ALWAYS_INLINE uint32_t rotate_right(uint32_t h, uint32_t bits) {
   return (h << (sizeof(h) * 8 - bits)) | (h >> bits);
 }
 
-#define check(c) while (!(c)) { std::cerr << "check failed " << #c << std::endl; *reinterpret_cast<int*>(1234) = 4321;}
+// Fatal internal error: report where, then exit immediately (no crash dialog, and no
+// static destructors running while worker threads are still alive).
+#define check(c) while (!(c)) { \
+  std::cerr << "Fatal: check failed: " << #c << " (" << __FILE__ << ":" << __LINE__ << ")" << std::endl; \
+  std::cerr.flush(); \
+  std::_Exit(3); \
+}
 #define dcheck(c) assert(c)
 
 template <const uint32_t A, const uint32_t B, const uint32_t C, const uint32_t D>

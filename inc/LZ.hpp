@@ -302,9 +302,10 @@ public:
       auto diff = *reinterpret_cast<const ulong*>(in_ptr_ + len) ^ *reinterpret_cast<const ulong*>(match_ptr + len);
       if (UNLIKELY(diff)) {
         ulong idx = 0;
-#ifdef WIN32
-        // TODO
+#if defined(_MSC_VER)
         _BitScanForward(&idx, diff);
+#else
+        idx = static_cast<ulong>(__builtin_ctzl(diff));  // diff != 0 here.
 #endif
         len += idx >> 3;
         break;

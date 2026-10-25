@@ -941,6 +941,7 @@ namespace cm {
             uint32_t ch = c << 24;
             bool second_nibble = false;
             size_t base_ctx = 0;
+            size_t high_nibble = 0;  // First (high) nibble, needed to rebuild the byte when decoding.
             for (;;) {
               auto* st0 = s0 + ctx;
               auto* st1 = s1 + ctx;
@@ -975,7 +976,8 @@ namespace cm {
                 if (second_nibble) {
                   break;
                 }
-                base_ctx = 15 + (ctx ^ 0x10) * 15;
+                high_nibble = ctx ^ 0x10;
+                base_ctx = 15 + high_nibble * 15;
                 s0 += base_ctx;
                 s1 += base_ctx;
                 s2 += base_ctx;
@@ -984,7 +986,11 @@ namespace cm {
               }
             }
             if (decode) {
-              c = ctx & 0xFF;
+              // ctx only holds the second nibble (plus the 0x10 marker) here. It used to be
+              // returned as-is, losing the high nibble: every byte decoded through this fast
+              // path (after a long run of unpredictable data) was wrong, and since the
+              // contexts then diverged from the encoder, the rest of the stream was garbage.
+              c = static_cast<uint32_t>((high_nibble << 4) | (ctx ^ 0x10));
             }
           }
           return c;

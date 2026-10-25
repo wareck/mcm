@@ -106,6 +106,7 @@ std::string formatNumber(uint64_t n) {
 }
 
 std::string trimDir(const std::string& str) {
+  if (str.empty()) return str;
   return str.substr(0, str.length() - (str.back() == '\\' || str.back() == '/'));
 }
 

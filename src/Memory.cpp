@@ -27,10 +27,12 @@
 #include "Memory.hpp"
 #include "Util.hpp"
 
+#include <new>
+
 #define USE_MALLOC 1
 
-#ifdef WIN32
-#include <Windows.h>
+#ifdef _WIN32
+#include <windows.h>
 #else
 // TODO: mmap
 #endif
@@ -52,18 +54,24 @@ void MemMap::resize(size_t bytes) {
   size = bytes;
 #if USE_MALLOC
   storage = std::calloc(1, bytes);
-#elif WIN32
+#elif defined(_WIN32)
   storage = (void*)VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 #else
 #error UNIMPLEMENTED
 #endif
+  if (storage == nullptr && bytes != 0) {
+    // Report instead of crashing later on a null pointer (e.g. a high memory level
+    // like -x10 on a machine or a 32-bit process without enough memory).
+    size = 0;
+    throw std::bad_alloc();
+  }
 }
 
 void MemMap::release() {
   if (storage != nullptr) {
 #if USE_MALLOC
     std::free(storage);
-#elif WIN32
+#elif defined(_WIN32)
     BOOL result = VirtualFree((LPVOID)storage, size, MEM_DECOMMIT);
 #else
 #error UNIMPLEMENTED
@@ -73,9 +81,9 @@ void MemMap::release() {
 }
 
 void MemMap::zero() {
-#ifdef USE_MALLOC
-  std::memset(storage, 0, size);
-#elif WIN32
+#if USE_MALLOC
+  if (storage != nullptr) std::memset(storage, 0, size);
+#elif defined(_WIN32)
   storage = (void*)VirtualAlloc(storage, size, MEM_RESET, PAGE_READWRITE);
 #else
   madvise(storage, size, MADV_DONTNEED);

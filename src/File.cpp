@@ -97,9 +97,11 @@ std::string FileInfo::attrToStr(uint16_t attr) {
   return oss.str();
 }
 
-#ifdef WIN32
-#include <Windows.h>
+#ifdef _WIN32
+#include <windows.h>
+#ifdef _MSC_VER
 #pragma comment(lib, "User32.lib")
+#endif
 
 void FileInfo::CreateDir(const std::string& name) {
   CreateDirectoryA(name.c_str(), nullptr);
@@ -148,10 +150,10 @@ bool FileList::addDirectory(const std::string& dir, const std::string* prefix) {
     }
   } while (FindNextFileA(handle, &ffd) != 0);
   auto err = GetLastError();
+  FindClose(handle);  // Always release the search handle, also on error.
   if (err != ERROR_NO_MORE_FILES) {
     return false;
   }
-  FindClose(handle);
   return true;
 }
 

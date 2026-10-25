@@ -33,7 +33,7 @@
 #include "Compressor.hpp"
 #include "Stream.hpp"
 
-#ifndef WIN32
+#ifndef _WIN32
 #define _fseeki64 fseeko
 #define _ftelli64 ftello
 // extern int __cdecl _fseeki64(FILE *, int64_t, int);

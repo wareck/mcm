@@ -23,7 +23,10 @@
 
 #include <chrono>
 #include <ctime>
+#include <cstdio>
+#include <exception>
 #include <fstream>
+#include <new>
 #include <stdio.h>
 #include <string.h>
 #include <string>
@@ -90,6 +93,9 @@ public:
   const std::string kDictArg = "-dict=";
   const std::string kOutDictArg = "-out-dict=";
   std::string dict_file;
+  // Decompression: output path (file or directory) given on the command line.
+  bool has_explicit_out = false;
+  std::string out_arg;
 
   int usage(const std::string& name) {
     printHeader();
@@ -167,7 +173,9 @@ public:
         std::istringstream iss(argv[++i]);
         iss >> block_size;
         block_size *= MB;
-        if (!iss.good()) {
+        // Note: good() is false once the whole string has been read (eofbit), so a valid
+        // "-b 8" used to be rejected. Only a failed extraction is an error.
+        if (iss.fail()) {
           return usage(program);
         }
       } else if (arg == "-store") {
@@ -235,13 +243,14 @@ public:
     }
     const bool single_file_mode =
       mode == kModeCompress || mode == kModeDecompress || mode == kModeSingleTest ||
-      mode == kModeMemTest || mode == kModeOpt || kModeList;
+      mode == kModeMemTest || mode == kModeOpt || mode == kModeList;
     if (single_file_mode && i < argc) {
       std::string in_file, out_file;
       // Read in file and outfile.
       in_file = argv[i++];
       if (i < argc) {
         out_file = argv[i++];
+        has_explicit_out = true;
       } else {
         if (mode == kModeDecompress) {
           out_file = in_file + ".decomp";
@@ -258,6 +267,7 @@ public:
       } else {
         archive_file = FileInfo(trimDir(in_file));
         files.push_back(FileInfo(trimDir(out_file)));
+        out_arg = trimDir(out_file);
       }
     }
     if (mode != kModeMemTest &&
@@ -271,7 +281,7 @@ public:
 };
 
 extern void RunBenchmarks();
-int main(int argc, char* argv[]) {
+static int mcmMain(int argc, char* argv[]) {
   if (!kReleaseBuild) {
     RunAllTests();
   }
@@ -303,6 +313,7 @@ int main(int argc, char* argv[]) {
       File f(file.getName(), std::ios_base::in | std::ios_base::binary);
       size_t count = f.read(in_buffer + read_pos, static_cast<size_t>(lengths[index]));
       check(count == lengths[index]);
+      read_pos += count;  // Was never advanced: every file landed on top of the first one.
       index++;
     }
     // Create the memory compressor.
@@ -497,9 +508,19 @@ int main(int argc, char* argv[]) {
       Archive archive(&fout, options.options_);
       uint64_t in_bytes = archive.compress(options.files);
       clock_t time = clock() - start;
+      if (archive.hadError()) {
+        // E.g. an unreadable input file: do not leave an incomplete archive behind.
+        std::cerr << "Compression failed" << std::endl;
+        fout.close();
+        std::remove(out_file.c_str());
+        return 1;
+      }
       std::cout << "Done compressing " << formatNumber(in_bytes) << " -> " << formatNumber(fout.tell())
-        << " in " << std::setprecision(3) << clockToSeconds(time) << "s"
-        << " bpc=" << double(fout.tell()) * 8.0 / double(in_bytes) << std::endl;
+        << " in " << std::setprecision(3) << clockToSeconds(time) << "s";
+      if (in_bytes != 0) {  // No ratio for empty input (was "inf").
+        std::cout << " bpc=" << double(fout.tell()) * 8.0 / double(in_bytes);
+      }
+      std::cout << std::endl;
 
       fout.close();
 
@@ -511,7 +532,9 @@ int main(int argc, char* argv[]) {
         Archive archive(&fout);
         archive.list();
         std::cout << "Verifying archive decompression" << std::endl;
-        archive.decompress("", true);
+        if (!archive.decompress("", true)) {
+          return 1;  // Verification failed (message already printed).
+        }
       }
     }
     break;
@@ -565,10 +588,19 @@ int main(int argc, char* argv[]) {
       std::cerr << "Attempting to decompress other version " << header.majorVersion() << "." << header.minorVersion() << std::endl;
       return 1;
     }
-    // archive.decompress(options.files.back().getName());
-    archive.decompress("");
+    // The output argument used to be ignored: files were always written under the name stored
+    // in the archive, in the current directory (possibly overwriting the original).
+    // Now "mcm d a.mcm out": a one-file archive is written to "out", otherwise "out" is the
+    // directory to extract to. Without an output argument the stored names are used and
+    // existing files are not overwritten.
+    const bool ok = options.has_explicit_out
+      ? archive.decompress(options.out_arg, false, options.out_arg, true)
+      : archive.decompress("", false, "", false);
     fin.close();
-    // Decompress the single file in the archive to the output out.
+    if (!ok) {
+      std::cerr << "Decompression failed" << std::endl;
+      return 1;
+    }
     break;
   }
   case Options::kModeExtract: {
@@ -582,4 +614,15 @@ int main(int argc, char* argv[]) {
   }
   }
   return 0;
+}
+
+int main(int argc, char* argv[]) {
+  try {
+    return mcmMain(argc, argv);
+  } catch (const std::bad_alloc&) {
+    std::cerr << "Error: out of memory. Try a lower memory level (for example -m5 instead of -m9)." << std::endl;
+  } catch (const std::exception& e) {
+    std::cerr << "Error: " << e.what() << std::endl;
+  }
+  return 1;
 }

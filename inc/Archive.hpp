@@ -178,9 +178,19 @@ public:
 
   // Analyze and compress. Returns how many bytes wre compressed.
   uint64_t compress(const std::vector<FileInfo>& in_files);
+  // True if the last compress() stopped on an error (e.g. an input file could not be opened).
+  // A return value of 0 alone only means that there was nothing to compress (empty input).
+  bool hadError() const { return had_error_; }
 
-  // Decompress.
-  void decompress(const std::string& out_dir, bool verify = false);
+  // Decompress. Returns false if nothing could be extracted / verification failed.
+  //  out_dir: directory to extract into ("" = current directory).
+  //  verify: compare against the original files instead of writing anything.
+  //  single_out_file: if not empty and the archive holds exactly one regular file, that file
+  //    is written to this path instead of the name stored in the archive.
+  //  allow_overwrite: if false, refuse to replace an already existing file.
+  // Names stored in the archive are sanitized (no "..", no absolute paths or drive letters).
+  bool decompress(const std::string& out_dir, bool verify = false,
+                  const std::string& single_out_file = std::string(), bool allow_overwrite = true);
 
   // List files and info.
   void list();
@@ -190,7 +200,8 @@ private:
   Stream* stream_;
   Header header_;
   CompressionOptions options_;
-  size_t opt_var_;  
+  size_t opt_var_;
+  bool had_error_ = false;
   FileList files_;  // File list.
   Blocks blocks_;  // Solid blocks.
 

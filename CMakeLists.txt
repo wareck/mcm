@@ -16,13 +16,15 @@ if ("${CMAKE_SYSTEM_NAME}" MATCHES "Linux" AND NOT EMSCRIPTEN AND NOT ANDROID)
 	set(LINUX TRUE)
 endif()
 
-if (WIN32 AND IS_GCC_LIKE)
-	add_definitions(-DWIN32)
-endif()
-
 if(WIN32)
   add_definitions(-DUNICODE -D_UNICODE)
   add_definitions(-D_WIN32_WINNT=0x0A00)
+endif()
+
+# MinGW-w64: link the runtime statically so mcm.exe needs no extra DLLs
+# (libstdc++-6.dll, libgcc_s_seh-1.dll, libwinpthread-1.dll).
+if(MINGW)
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static -static-libgcc -static-libstdc++")
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")

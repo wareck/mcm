@@ -674,7 +674,59 @@ private:
   std::vector<DedupeFragment> dedupe_fragments_;
 };
 
+// Make a name stored in an archive safe to extract below a base directory: only plain
+// relative components survive (".", ".." and empty parts, drive letters and a leading
+// separator are dropped) and both kinds of separators become '/'. Sets *unsafe when
+// something that could escape the target directory had to be removed.
+static std::string SanitizeArchiveName(const std::string& name, bool* unsafe) {
+  std::string out, part;
+  size_t start = 0;
+  if (name.size() >= 2 && name[1] == ':' &&
+      ((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z'))) {
+    start = 2;  // Drive letter.
+    *unsafe = true;
+  }
+  if (start < name.size() && (name[start] == '/' || name[start] == '\\')) {
+    *unsafe = true;  // Absolute path.
+  }
+  auto flush = [&]() {
+    if (part == "..") {
+      *unsafe = true;
+    } else if (!part.empty() && part != ".") {
+      if (!out.empty()) out += '/';
+      out += part;
+    }
+    part.clear();
+  };
+  for (size_t i = start; i < name.size(); ++i) {
+    char c = name[i];
+    if (c == '/' || c == '\\') {
+      flush();
+    } else {
+#ifdef _WIN32
+      if (c == ':') {  // NTFS alternate data streams.
+        *unsafe = true;
+        c = '_';
+      }
+#endif
+      part += c;
+    }
+  }
+  flush();
+  return out;
+}
+
+// Create every missing directory leading to path (the last component is not created).
+static void CreateParentDirs(const std::string& path) {
+  for (size_t i = 1; i < path.size(); ++i) {
+    if (path[i] == '/' || path[i] == '\\') {
+      FileInfo::CreateDir(path.substr(0, i));
+    }
+  }
+}
+
 uint64_t Archive::compress(const std::vector<FileInfo>& in_files) {
+  had_error_ = false;
   std::list<std::string> prefixes;
   blocks_.clear();
   // Enumerate files
@@ -723,6 +775,11 @@ uint64_t Archive::compress(const std::vector<FileInfo>& in_files) {
         int err;
         if (err = fin.open(f.getFullName(), std::ios_base::in | std::ios_base::binary)) {
           std::cerr << "Error opening: " << f.getName() << " (" << errstr(err) << ")" << std::endl;
+          // Do not go on with a file we cannot read: the archive would be incomplete.
+          had_error_ = true;
+          blocks_.clear();
+          files_.clear();
+          return 0;
         }
         thr.setStream(&fin);
         analyzer.analyze(&fin, file_idx);
@@ -816,13 +873,58 @@ uint64_t Archive::compress(const std::vector<FileInfo>& in_files) {
 }
 
 // Decompress.
-void Archive::decompress(const std::string& out_dir, bool verify) {
+bool Archive::decompress(const std::string& out_dir, bool verify,
+                         const std::string& single_out_file, bool allow_overwrite) {
   readBlocks();
+  // Do not leave dangling prefix pointers behind in files_.
+  struct PrefixReset {
+    FileList& list;
+    ~PrefixReset() { for (auto& f : list) f.setPrefix(nullptr); }
+  } prefix_reset{files_};
+  std::string prefix;
+  if (!verify) {
+    // An archive made of exactly one regular file goes to the requested output file.
+    const bool single_file = !single_out_file.empty() && files_.size() == 1 && !files_[0].isDir();
+    if (single_file) {
+      files_[0].SetName(single_out_file);
+    } else {
+      if (!out_dir.empty()) {
+        prefix = out_dir;
+        if (prefix.back() != '/' && prefix.back() != '\\') prefix += '/';
+        CreateParentDirs(prefix);
+      }
+      for (auto& f : files_) {
+        bool unsafe = false;
+        const std::string safe = SanitizeArchiveName(f.getName(), &unsafe);
+        if (safe.empty()) {
+          std::cerr << "Refusing to extract entry with an invalid name: " << f.getName() << std::endl;
+          return false;
+        }
+        if (unsafe) {
+          std::cerr << "Warning: unsafe name in archive, extracting " << f.getName() << " as " << safe << std::endl;
+        }
+        f.SetName(safe);
+      }
+    }
+    if (!allow_overwrite) {
+      for (auto& f : files_) {
+        f.setPrefix(&prefix);
+        const std::string full = f.getFullName();
+        if (!f.isDir() && fileExists(full.c_str())) {
+          std::cerr << "Refusing to overwrite existing file " << full
+                    << " (give an explicit output path to replace it)" << std::endl;
+          return false;
+        }
+      }
+    }
+  }
   for (auto& f : files_) {
-    f.setPrefix(&out_dir);
+    f.setPrefix(&prefix);
     if (f.isDir()) {
       // Create directories first.
       FileInfo::CreateDir(f.getFullName());
+    } else if (!verify) {
+      CreateParentDirs(f.getFullName());
     }
   }
   std::vector<uint64_t> remain_bytes;
@@ -876,18 +978,34 @@ void Archive::decompress(const std::string& out_dir, bool verify) {
     std::cout << std::endl << "Decompressed " << formatNumber(out_stream->tell()) << " <- " << formatNumber(stream_->tell() - out_start)
       << " in " << clockToSeconds(clock() - start) << "s" << std::endl << std::endl;
   }
+  if (!verify) {
+    for (auto& f : files_) {
+      const std::string full = f.getFullName();
+      if (!f.isDir() && !fileExists(full.c_str())) {
+        File empty;  // Empty files have no data in any block: create them here.
+        const int err = empty.open(full, std::ios_base::out | std::ios_base::binary);
+        if (err != 0) {
+          std::cerr << "Error creating: " << full << " (" << errstr(err) << ")" << std::endl;
+        }
+      }
+    }
+  }
+  bool ok = true;
   if (verify) {
     for (size_t i = 0; i < files_.size(); ++i) {
       if (remain_bytes[i] > 0) {
         std::cerr << "Missed writing " << remain_bytes[i] << " bytes to " << files_[i].getFullName() << std::endl;
+        ok = false;
       }
     }
     if (differences) {
       std::cerr << "DECOMPRESSION FAILED, " << differences << " differences" << std::endl;
+      ok = false;
     } else {
       std::cout << "No differences found" << std::endl;
     }
   }
+  return ok;
 }
 
 void Archive::list() {
